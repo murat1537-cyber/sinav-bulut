@@ -4,12 +4,11 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import datetime
 import random
-import pandas as pd # Veri analizi ve grafikler için
+import pandas as pd
 
 # --- AYARLAR VE TASARIM ---
 st.set_page_config(page_title="Sınav Koçu Pro", layout="wide", page_icon="🎓")
 
-# Özel CSS ile biraz makyaj yapalım
 st.markdown("""
     <style>
     .stButton>button {
@@ -19,6 +18,13 @@ st.markdown("""
     }
     .big-font {
         font-size:20px !important;
+    }
+    .hata-kutusu {
+        padding: 10px;
+        border-radius: 5px;
+        background-color: #ffe6e6;
+        border-left: 5px solid #ff4b4b;
+        margin-bottom: 10px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -51,7 +57,7 @@ def sonraki_tekrar_hesapla(mevcut_interval, performans):
         else: return mevcut_interval * 2
 
 # --- 3. VERİ YÖNETİMİ ---
-@st.cache_data(ttl=60) # Verileri 1 dakika önbellekte tut ki hızlansın
+@st.cache_data(ttl=60)
 def verileri_cek():
     with open(SORU_DOSYASI, 'r', encoding='utf-8') as f:
         ham_sorular = json.load(f)
@@ -77,7 +83,7 @@ def ilerlemeyi_kaydet(guncel_veri_dict):
     try:
         sheet = google_baglan()
         sheet.update_acell('A1', json.dumps(guncel_veri_dict))
-        verileri_cek.clear() # Kayıt yapınca önbelleği temizle
+        verileri_cek.clear()
     except Exception as e:
         st.error(f"Kayıt hatası: {e}")
 
@@ -99,6 +105,7 @@ def cevap_isleme(soru, puan, hata_turu=None):
     if puan == 2: # Eminim
         streak += 1
         if streak >= 3: status = "master"
+        hata_turu = None # Doğru bildiyse hata kaydını temizle (İstersen tutabilirsin)
     elif puan == 0: # Yanlış
         streak = 0
         status = "ogreniliyor"
@@ -110,13 +117,17 @@ def cevap_isleme(soru, puan, hata_turu=None):
         "next_review": str(sonraki_tarih),
         "streak": streak,
         "attempts": soru['attempts'] + 1,
-        "last_error": hata_turu
+        "last_error": hata_turu if hata_turu else soru['last_error'] # Yeni hata yoksa eskisini koru veya güncelle
     }
     
-    # Session ve Drive güncelle
+    # Hata türü temizleme mantığı: Eğer doğru bildiyse 'last_error'u silebiliriz
+    # Veya geçmiş hatası kalsın istiyorsan yukarıdaki satırı değiştirmemelisin.
+    # Ben temizliyorum ki "Hatalılar" listesinden düşsün.
+    if puan == 2:
+        yeni_veri["last_error"] = None 
+
     st.session_state['user_data'][s_id] = yeni_veri
     
-    # Sorular listesini de güncelle (Anlık grafik için)
     for s in st.session_state['sorular']:
         if str(s['id']) == s_id:
             s.update(yeni_veri)
@@ -128,38 +139,34 @@ def cevap_isleme(soru, puan, hata_turu=None):
     st.session_state['step'] = 'soru_goster'
     st.rerun()
 
-# --- ARAYÜZ (TABS SİSTEMİ) ---
+# --- ARAYÜZ ---
 st.title("🚀 Sınav Koçu Pro")
 
-tab1, tab2 = st.tabs(["📝 Soru Çözümü", "📊 Analiz ve Raporlar"])
+tab1, tab2 = st.tabs(["📝 Soru Çözümü", "📊 Analiz ve Hatalar"])
 
 # --- SEKME 1: SORU ÇÖZÜMÜ ---
 with tab1:
-    # Soru Seçme
     if st.session_state['aktif_soru'] is None:
         bugun = datetime.date.today().strftime("%Y-%m-%d")
         havuz = [s for s in st.session_state['sorular'] if s['status'] == 'yeni' or (s['next_review'] and s['next_review'] <= bugun)]
         
         if not havuz:
             st.success("🎉 Harika! Bugünlük programını tamamladın.")
-            st.info("İstersen 'Analiz' sekmesinden durumuna bakabilirsin.")
+            st.info("Yan sekmeden yanlışlarına göz atabilirsin.")
             st.stop()
         st.session_state['aktif_soru'] = random.choice(havuz)
 
     soru = st.session_state['aktif_soru']
 
-    # Modern Soru Kartı Tasarımı
     with st.container():
         st.markdown(f"#### 🔹 Soru (ID: {soru['id']})")
         st.info(soru['soru'], icon="❓")
         
         if st.session_state['step'] == 'soru_goster':
             with st.form(key='cevap_form'):
-                secim = st.radio("Doğru seçenek hangisi?", soru['secenekler'], index=None)
+                secim = st.radio("Seçenekler:", soru['secenekler'], index=None)
                 st.write("")
-                col_sub1, col_sub2 = st.columns([1, 4])
-                with col_sub1:
-                    submit = st.form_submit_button("Yanıtla ➡️", use_container_width=True)
+                submit = st.form_submit_button("Yanıtla ➡️", type="primary")
                 
                 if submit and secim:
                     st.session_state['verilen_cevap'] = secim
@@ -167,78 +174,80 @@ with tab1:
                     st.session_state['step'] = 'sonuc_goster'
                     st.rerun()
 
-        # SONUÇ EKRANI VE BUTONLAR
         elif st.session_state['step'] == 'sonuc_goster':
             if st.session_state['dogru_mu']:
                 st.success(f"✅ TEBRİKLER! Doğru Cevap: {st.session_state['verilen_cevap']}")
-                st.markdown("---")
-                st.write("**Bu soruyu ne kadar iyi biliyorsun?**")
+                st.write("**Kendini Değerlendir:**")
                 c1, c2 = st.columns(2)
-                if c1.button("😎 Eminim (Tam Öğrendim)", type="primary"):
-                    cevap_isleme(soru, 2)
-                if c2.button("🤔 Tahmin Ettim / Şans"):
-                    cevap_isleme(soru, 1)
+                if c1.button("😎 Eminim", type="primary"): cevap_isleme(soru, 2)
+                if c2.button("🤔 Tahmin Ettim"): cevap_isleme(soru, 1)
             else:
-                st.error(f"❌ Maalesef Yanlış. Senin cevabın: {st.session_state['verilen_cevap']}")
+                st.error(f"❌ Yanlış. Senin cevabın: {st.session_state['verilen_cevap']}")
                 st.warning(f"👉 Doğru Cevap: **{soru['dogru_cevap']}**")
                 
                 if "aciklama" in soru:
-                    with st.expander("ℹ️ Neden Yanlış? (Açıklama)"):
+                    with st.expander("ℹ️ Açıklama"):
                         st.write(soru["aciklama"])
                 
-                st.markdown("---")
-                st.write("🛑 **Hata Analizi: Neden Yanlış Yaptın? (Seç ve İlerle)**")
-                
-                # Hata butonları artık direkt işlemi bitiriyor
+                st.write("🛑 **Neden Yanlış Yaptın?**")
                 h1, h2, h3, h4 = st.columns(4)
                 if h1.button("📚 Bilgi Eksiği"): cevap_isleme(soru, 0, "Bilgi Eksiği")
                 if h2.button("👀 Dikkat Hatası"): cevap_isleme(soru, 0, "Dikkat Hatası")
                 if h3.button("🧠 Yanlış Yorum"): cevap_isleme(soru, 0, "Yanlış Yorum")
-                if h4.button("⏳ Süre / Diğer"): cevap_isleme(soru, 0, "Diğer")
+                if h4.button("⏳ Diğer"): cevap_isleme(soru, 0, "Diğer")
 
-# --- SEKME 2: ANALİZ VE RAPORLAR ---
+# --- SEKME 2: ANALİZ VE HATALAR (YENİLENMİŞ KISIM) ---
 with tab2:
-    st.header("📊 Performans Analizin")
+    st.header("📊 Analiz ve Hata Kütüphanesi")
     
-    # Veriyi Pandas DataFrame'e çevir (Analiz için çok güçlüdür)
     df = pd.DataFrame(st.session_state['sorular'])
     
-    # 1. Genel Durum Metrikleri
-    total = len(df)
-    master = len(df[df['status'] == 'master'])
-    learning = len(df[df['status'] == 'ogreniliyor'])
-    new = len(df[df['status'] == 'yeni'])
-    
+    # Metrikler
     col1, col2, col3 = st.columns(3)
-    col1.metric("Toplam Soru", total)
-    col2.metric("Ustalaşılan (Master)", master, delta=f"%{(master/total)*100:.1f}")
-    col3.metric("Çalışılan / Riskli", learning)
+    col1.metric("Toplam Soru", len(df))
+    col2.metric("Öğrenilen (Master)", len(df[df['status'] == 'master']))
+    hatali_sayisi = len(df[df['last_error'].notnull()])
+    col3.metric("Düzeltilmesi Gereken Hatalar", hatali_sayisi, delta_color="inverse")
     
     st.markdown("---")
     
-    # 2. Grafikler Yan Yana
-    g_col1, g_col2 = st.columns(2)
+    # FİLTRELEME SEÇENEKLERİ
+    st.subheader("🔍 Soru İnceleme")
+    filtre = st.radio(
+        "Hangi soruları listelemek istersin?",
+        ["Sadece Yanlış Yaptıklarım (Hatalılar)", "Tüm Sorular", "Öğrendiklerim (Master)"],
+        horizontal=True
+    )
     
-    with g_col1:
-        st.subheader("📈 Öğrenme Durumu")
-        # Basit bir bar chart
-        chart_data = pd.DataFrame({
-            'Durum': ['Yeni', 'Öğreniliyor', 'Master'],
-            'Soru Sayısı': [new, learning, master]
-        }).set_index('Durum')
-        st.bar_chart(chart_data, color=["#FF6C6C"]) # Kırmızı tonu
+    if filtre == "Sadece Yanlış Yaptıklarım (Hatalılar)":
+        # Hata kaydı olanları filtrele
+        hatali_df = df[df['last_error'].notnull()]
         
-    with g_col2:
-        st.subheader("🛑 Hata Türleri Analizi")
-        # Sadece hatası olanları filtrele
-        errors = df[df['last_error'].notnull()]['last_error'].value_counts()
-        
-        if not errors.empty:
-            st.bar_chart(errors)
-            st.caption("En çok hangi hatayı yapıyorsan ona odaklanmalısın!")
+        if hatali_df.empty:
+            st.success("Harika! Şu an sistemde kayıtlı 'düzeltilmemiş' bir hatan yok.")
         else:
-            st.info("Henüz yeterince hata verisi oluşmadı.")
+            st.warning(f"Toplam {len(hatali_df)} adet hatalı veya eksik olduğun soru var.")
             
-    # 3. Detaylı Liste (İsteğe bağlı)
-    with st.expander("📋 Detaylı Soru Listesi (Tüm Veriler)"):
-        st.dataframe(df[['id', 'soru', 'status', 'streak', 'last_error']])
+            # Tabloyu göster ama okunabilir sütunları seç
+            # HTML render ile tabloyu daha şık yapabiliriz ama şimdilik standart dataframe
+            st.dataframe(
+                hatali_df[['id', 'soru', 'dogru_cevap', 'last_error']],
+                hide_index=True,
+                use_container_width=True
+            )
+            
+            st.markdown("### 📝 Hata Detayları")
+            # Hataları tek tek kart olarak gösterme opsiyonu
+            for index, row in hatali_df.iterrows():
+                with st.expander(f"🔴 Soru {row['id']} - Hata Sebebi: {row['last_error']}"):
+                    st.write(f"**Soru:** {row['soru']}")
+                    st.success(f"**Doğru Cevap:** {row['dogru_cevap']}")
+                    st.caption("Bu soruyu tekrar çözdüğünde ve 'Eminim' dediğinde listeden kalkacak.")
+
+    elif filtre == "Öğrendiklerim (Master)":
+        master_df = df[df['status'] == 'master']
+        st.success(f"🏆 Toplam {len(master_df)} soruda ustalaştın!")
+        st.dataframe(master_df[['id', 'soru', 'streak']], hide_index=True, use_container_width=True)
+
+    else: # Tüm Sorular
+        st.dataframe(df[['id', 'soru', 'status', 'last_error']], hide_index=True, use_container_width=True)
